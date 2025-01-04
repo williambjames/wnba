@@ -4,15 +4,20 @@ library(dplyr)
 library(progressr)
 library(tictoc)
 library(stringr)
-schedule <- load_wnba_schedule(most_recent_wnba_season())
-box <- load_wnba_player_box()
+schedule <- load_wnba_schedule(2024)
+box <- load_wnba_player_box(2024)
 box <- box %>% 
   filter(game_id %in% schedule$game_id)
+# box[box$game_id == 400927495 & box['athlete_display_name'] == 'Jordan Hooper', "starter"] = TRUE
+# box[box$game_id == 401230846 & box['athlete_display_name'] == 'Essence Carson', "starter"] = TRUE
 
 
-pbp <- load_wnba_pbp(season = most_recent_wnba_season())
-pbp <- pbp %>% 
-  filter(id != 401620426564)
+pbp <- load_wnba_pbp(season = 2024)
+# pbp <- readxl::read_xlsx('pbp_to_fix.xlsx')
+
+# pbp[pbp$id == 401391651151, 'team_id'] = 19
+pbp_ <- pbp %>% 
+  filter(game_id == 401230468)
 
 # Create separate home and away starters with team IDs
 starters_list <- box %>%
@@ -40,34 +45,59 @@ starters_list <- box %>%
     away_player_4 = starters_4_away,
     away_player_5 = starters_5_away
   )
+years = load_wnba_team_box(seasons = 2017:most_recent_wnba_season())
+write.csv(years, 'team_box.csv')
 
+home_lineup_cols <- paste0("home_player_", 1:5)
+away_lineup_cols <- paste0("away_player_", 1:5)
+all_lineup_cols <- c(home_lineup_cols, away_lineup_cols)
+
+# Convert player columns and substitution columns to character
 pbp <- pbp %>%
-  # Add home and away player columns by matching team_id with home_team_id or away_team_id
-  left_join(starters_list %>%
-              select(game_id, home_team_id, starts_with("home_player_")), 
-            by = c("game_id" = "game_id", "team_id" = "home_team_id")) %>%
-  left_join(starters_list %>%
-              select(game_id, away_team_id, starts_with("away_player_")), 
-            by = c("game_id" = "game_id", "team_id" = "away_team_id"))
+  # Join home and away lineups based on game_id
+  left_join(
+    starters_list %>%
+      select(game_id, starts_with("home_player_")), 
+    by = "game_id"
+  ) %>%
+  left_join(
+    starters_list %>%
+      select(game_id, starts_with("away_player_")), 
+    by = "game_id"
+  ) %>%
+  # Convert player columns to character
+  mutate(
+    # across(all_of(all_lineup_cols), as.character),
+    athlete_id_1 = as.character(athlete_id_1),
+    athlete_id_2 = as.character(athlete_id_2)
+  ) %>%
+  # Standardize athlete IDs: trim whitespace and convert to lowercase
+  mutate(
+    # across(all_of(all_lineup_cols), ~ trimws(tolower(.))),
+    athlete_id_1 = trimws(tolower(athlete_id_1)),
+    athlete_id_2 = trimws(tolower(athlete_id_2))
+  )
 
-# Update lineups for substitutions and ensure lineups are consistent
-pbp_on_court <- update_lineups(pbp) %>%
-  arrange(game_id, game_play_number) %>%
+
+
+pbp_on_court <- pbp %>%
+  update_lineups_v2() %>%
+  arrange(game_id, sequence_number) %>%
   rename(possession_team = team_id) %>%
   group_by(game_id) %>%
-  arrange(game_play_number) %>%
-  # Forward-fill player columns for home and away teams
+  arrange(sequence_number) %>%
+  # Forward-fill player columns for home and away teams to handle any remaining NAs
   mutate(
-    across(starts_with("home_player_"), ~ zoo::na.locf(.x, na.rm = FALSE)),
-    across(starts_with("away_player_"), ~ zoo::na.locf(.x, na.rm = FALSE))
+    across(starts_with("home_player_"), ~ na.locf(.x, na.rm = FALSE)),
+    across(starts_with("away_player_"), ~ na.locf(.x, na.rm = FALSE))
   ) %>%
-  # Calculate possession changes and IDs
+  # Calculate possession changes and assign possession IDs
   mutate(
     possession_change = possession_team != lag(possession_team, default = first(possession_team)),
     possession_id = cumsum(possession_change)
   ) %>%
   ungroup() %>%
-  # Handle cases where possession_id == 0 has missing starters
+  # Handle cases where possession_id == 0 has missing starters by assigning the first possession lineup
   group_by(game_id) %>%
   mutate(
     across(
@@ -80,6 +110,44 @@ pbp_on_court <- update_lineups(pbp) %>%
     )
   ) %>%
   ungroup()
+
+
+sum(
+  is.na(
+    pbp_on_court[, c(paste0("home_player_", 1:5), paste0("away_player_", 1:5))]
+  )
+)
+
+# # Update lineups for substitutions and ensure lineups are consistent
+# pbp_on_court <- update_lineups_v2(pbp) %>%
+#   arrange(game_id, game_play_number) %>%
+#   rename(possession_team = team_id) %>%
+#   group_by(game_id) %>%
+#   arrange(game_play_number) %>%
+#   # Forward-fill player columns for home and away teams
+#   mutate(
+#     across(starts_with("home_player_"), ~ zoo::na.locf(.x, na.rm = FALSE)),
+#     across(starts_with("away_player_"), ~ zoo::na.locf(.x, na.rm = FALSE))
+#   ) %>%
+#   # Calculate possession changes and IDs
+#   mutate(
+#     possession_change = possession_team != lag(possession_team, default = first(possession_team)),
+#     possession_id = cumsum(possession_change)
+#   ) %>%
+#   ungroup() %>%
+#   # Handle cases where possession_id == 0 has missing starters
+#   group_by(game_id) %>%
+#   mutate(
+#     across(
+#       starts_with("home_player_"),
+#       ~ if_else(possession_id == 0 & is.na(.), first(.x[possession_id == 1], default = NA), .)
+#     ),
+#     across(
+#       starts_with("away_player_"),
+#       ~ if_else(possession_id == 0 & is.na(.), first(.x[possession_id == 1], default = NA), .)
+#     )
+#   ) %>%
+#   ungroup()
 
 # Generate possession-level data
 pbp_poss <- pbp_on_court %>%
@@ -116,10 +184,15 @@ pbp_poss <- pbp_on_court %>%
     away_poss_id = if_else(is.na(away_poss_id), 0L, away_poss_id)
   ) %>%
   ungroup()
+write.csv(schedule, 'schedule_24.csv')
+write.csv(box, 'box_24.csv')
+write.csv(pbp_poss, 'poss_24.csv')
+
+
 
 
 pbp_ <- pbp %>% 
-  filter(id==40162023428)
+  filter(game_id==401018785)
 
 pbp_poss_this <- pbp_poss %>%
   filter(game_id == 401620178)
